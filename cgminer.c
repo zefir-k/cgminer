@@ -1514,7 +1514,7 @@ static struct opt_table opt_config_table[] = {
 			opt_set_bool, &use_syslog,
 			"Use system log for output messages (default: standard error)"),
 #endif
-#if defined(USE_BITFORCE) || defined(USE_MODMINER) || defined(USE_BFLSC)
+#if defined(USE_BITFORCE) || defined(USE_MODMINER) || defined(USE_BFLSC) || defined(USE_BITMINE_A1)
 	OPT_WITH_CBARG("--temp-cutoff",
 		     set_temp_cutoff, opt_show_intval, &opt_set_temp_cutoff,
 		     "Temperature where a device will be automatically disabled, one value or comma separated list"),

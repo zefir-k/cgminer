@@ -906,12 +906,14 @@ void A1_detect(bool hotplug)
 }
 
 #define TEMP_UPDATE_INT_MS	2000
+#define TEMP_THROTTLE_SLEEP_MS	5000
 static int64_t A1_scanwork(struct thr_info *thr)
 {
 	int i;
 	struct cgpu_info *cgpu = thr->cgpu;
 	struct A1_chain *a1 = cgpu->device_data;
 	int32_t nonce_ranges_processed = 0;
+	int sleep_ms = 40;
 
 	if (a1->num_cores == 0) {
 		cgpu->deven = DEV_DISABLED;
@@ -931,6 +933,7 @@ static int64_t A1_scanwork(struct thr_info *thr)
 	if (a1->last_temp_time + TEMP_UPDATE_INT_MS < get_current_ms()) {
 		a1->temp = board_selector->get_temp(0);
 		a1->last_temp_time = get_current_ms();
+		cgpu->temp = a1->temp;
 	}
 	int cid = a1->chain_id;
 	/* poll queued results */
@@ -973,6 +976,13 @@ static int64_t A1_scanwork(struct thr_info *thr)
 		chip->nonces_found++;
 	}
 
+	if (cgpu->cutofftemp > 0 && a1->temp > cgpu->cutofftemp) {
+		applog(LOG_WARNING, "%d: throttling at %d (%d)",
+		       cid, a1->temp, cgpu->cutofftemp);
+		sleep_ms = TEMP_THROTTLE_SLEEP_MS;
+		work_updated = false;
+		goto done;
+	}
 	/* check for completed works */
 	for (i = a1->num_active_chips; i > 0; i--) {
 		uint8_t c = i;
@@ -997,7 +1007,6 @@ static int64_t A1_scanwork(struct thr_info *thr)
 			/* fall through */
 		case 0:
 			work_updated = true;
-
 			work = wq_dequeue(&a1->active_wq);
 			if (work == NULL) {
 				applog(LOG_INFO, "%d: chip %d: work underflow",
@@ -1016,6 +1025,7 @@ static int64_t A1_scanwork(struct thr_info *thr)
 		}
 	}
 	check_disabled_chips(a1);
+done:
 	mutex_unlock(&a1->lock);
 
 	board_selector->release();
@@ -1029,7 +1039,7 @@ static int64_t A1_scanwork(struct thr_info *thr)
 	}
 	/* in case of no progress, prevent busy looping */
 	if (!work_updated)
-		cgsleep_ms(40);
+		cgsleep_ms(sleep_ms);
 
 	return (int64_t)nonce_ranges_processed << 32;
 }

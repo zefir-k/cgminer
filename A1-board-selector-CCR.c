@@ -161,7 +161,7 @@ static bool ccr_reset_all(void)
 
 static uint8_t ccr_get_temp(uint8_t sensor_id)
 {
-	if ((active_chain & 1) != 0 || sensor_id != 0)
+	if (sensor_id != 0)
 		return 0;
 
 	struct i2c_ctx *U7 = i2c_slave_open(I2C_BUS, 0x4c);
