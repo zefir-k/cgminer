@@ -18,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <assert.h>
 #include <unistd.h>
+#include <linux/limits.h>  /* for PATH_MAX */
 
 struct spi_ctx *spi_init(struct spi_config *config)
 {
