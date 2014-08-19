@@ -94,6 +94,99 @@ struct A1_config_options A1_config_options = {
 /* override values with --bitmine-a1-options ref:sys:spi: - use 0 for default */
 static struct A1_config_options *parsed_config_options;
 
+#define MAX_BOARDS 8
+struct A1_extra_options {
+	int board_mask;
+	int override_diff; /* -1 = real diff */
+	int sys_clk_khz[MAX_BOARDS];
+	int wiper[MAX_BOARDS];
+	int chip_bitmask[MAX_BOARDS];
+};
+
+static struct A1_extra_options extra_options;
+
+static void A1_parse_option_array(char *opt, int *c, char *info, bool is_hex)
+{
+	int m[MAX_BOARDS];
+
+	if (opt[0] == 0)
+		return;
+	const char *format = is_hex ? "%x-%x-%x-%x-%x-%x-%x-%x" :
+				      "%d-%d-%d-%d-%d-%d-%d-%d";
+	memset(m, 0, sizeof(m));
+	applog(LOG_DEBUG, "%s: %s", info, opt);
+	int n = sscanf(opt, format,
+			m + 0, m + 1, m + 2, m + 3,
+			m + 4, m + 5, m + 6, m + 7);
+	if (n > 0) {
+		int i;
+		int last = m[n - 1];
+		for (i = 0; i < MAX_BOARDS; i++)
+			c[i] = (i < n) ? m[i] : last;
+
+		char prefix[80];
+		sprintf(prefix, "%s: %d entries scanned: %s", info, n, format);
+		applog(LOG_WARNING, prefix,
+			c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+	}
+}
+
+static void A1_parse_options(void)
+{
+	/* parse bimine-a1-options */
+	if (opt_bitmine_a1_options == NULL || parsed_config_options != NULL)
+		return;
+
+	int ref_clk = 0;
+	int sys_clk = 0;
+	int spi_clk = 0;
+	int override_chip_num = 0;
+	int wiper = 0;
+	int board_mask = 0;
+	int override_diff = 0;
+
+
+	static char clk_tmp[128];
+	static char wiper_tmp[128];
+	static char cmask_tmp[128];
+
+	sscanf(opt_bitmine_a1_options, "%d:%d:%d:%d:%d:%d:%x %s %s %s",
+	       &ref_clk, &sys_clk, &spi_clk, &override_chip_num,
+	       &wiper, &override_diff, &board_mask,
+	       clk_tmp, wiper_tmp, cmask_tmp);
+	if (ref_clk != 0)
+		A1_config_options.ref_clk_khz = ref_clk;
+	if (sys_clk != 0) {
+		if (sys_clk < 100000)
+			quit(1, "system clock must be above 100MHz");
+		A1_config_options.sys_clk_khz = sys_clk;
+	}
+	if (spi_clk != 0)
+		A1_config_options.spi_clk_khz = spi_clk;
+	if (override_chip_num != 0)
+		A1_config_options.override_chip_num = override_chip_num;
+	if (wiper != 0)
+		A1_config_options.wiper = wiper;
+
+	/* extra options */
+	struct A1_extra_options *eo = &extra_options;
+	if (override_diff != 0) {
+		applog(LOG_WARNING, "Using diff: %d", override_diff);
+		eo->override_diff = override_diff;
+	}
+	if (board_mask != 0) {
+		applog(LOG_WARNING, "Board mask: 0x%0x", board_mask);
+		eo->board_mask = board_mask;
+	}
+
+	A1_parse_option_array(clk_tmp, eo->sys_clk_khz, "sys_clk", false);
+	A1_parse_option_array(wiper_tmp, eo->wiper, "wiper", true);
+	A1_parse_option_array(cmask_tmp, eo->chip_bitmask, "chip_bitmask", true);
+	/* config options are global, scan them once */
+	parsed_config_options = &A1_config_options;
+}
+
+
 /********** temporary helper for hexdumping SPI traffic */
 static void applog_hexdump(char *prefix, uint8_t *buff, int len, int level)
 {
@@ -386,6 +479,15 @@ static bool check_chip(struct A1_chain *a1, int i)
 {
 	int chip_id = i + 1;
 	int cid = a1->chain_id;
+
+	if (extra_options.chip_bitmask[cid] & (1 << i)) {
+		applog(LOG_WARNING, "%d: bypassing chip %d",
+		       a1->chain_id, i);
+		a1->chips[i].num_cores = 0;
+		a1->chips[i].disabled = 1;
+		return false;;
+	}
+
 	if (!cmd_READ_REG(a1, chip_id)) {
 		applog(LOG_WARNING, "%d: Failed to read register for "
 		       "chip %d -> disabling", cid, chip_id);
@@ -586,9 +688,13 @@ static uint8_t *create_job(uint8_t chip_id, uint8_t job_id, struct work *work)
 	p1[0] = bswap_32(p2[0]);
 	p1[1] = bswap_32(p2[1]);
 	p1[2] = bswap_32(p2[2]);
-#ifdef USE_REAL_DIFF
-	p1[4] = get_diff(work->sdiff);
-#endif
+	if (extra_options.override_diff != 0) {
+		double diff = work->sdiff;
+		int od = extra_options.override_diff;
+		if (od != -1 && od < diff)
+			diff = od;
+		p1[4] = get_diff(diff);
+	}
 	return job;
 }
 
@@ -665,6 +771,11 @@ void exit_A1_chain(struct A1_chain *a1)
 
 struct A1_chain *init_A1_chain(struct spi_ctx *ctx, int chain_id)
 {
+	if (extra_options.board_mask & (1 << chain_id)) {
+		applog(LOG_WARNING, "%d: bypassing chain", chain_id);
+		return false;;
+	}
+
 	int i;
 	struct A1_chain *a1 = malloc(sizeof(*a1));
 	assert(a1 != NULL);
@@ -682,8 +793,10 @@ struct A1_chain *init_A1_chain(struct spi_ctx *ctx, int chain_id)
 	       a1->spi_ctx->config.bus, a1->spi_ctx->config.cs_line,
 	       a1->chain_id, a1->num_chips);
 
-	if (!set_pll_config(a1, 0, A1_config_options.ref_clk_khz,
-			    A1_config_options.sys_clk_khz))
+	int sys_clk = A1_config_options.sys_clk_khz;
+	if (extra_options.sys_clk_khz[a1->chain_id] != 0)
+		sys_clk = extra_options.sys_clk_khz[a1->chain_id];
+	if (!set_pll_config(a1, 0, A1_config_options.ref_clk_khz, sys_clk))
 		goto failure;
 
 	/* override max number of active chips if requested */
@@ -742,6 +855,19 @@ static bool detect_single_chain(void)
 	return true;
 }
 
+static void set_ccd_wiper(struct mcp4x *mcp, int board_id)
+{
+	if (extra_options.wiper[board_id] != 0) {
+		applog(LOG_WARNING, "%d: setting individual wiper 0x%x",
+		       board_id, extra_options.wiper[board_id]);
+		mcp->set_wiper(mcp, 0, extra_options.wiper[board_id]);
+	} else if (A1_config_options.wiper != 0) {
+		mcp->set_wiper(mcp, 0, A1_config_options.wiper);
+		applog(LOG_WARNING, "%d: setting global wiper 0x%x",
+		       board_id, A1_config_options.wiper);
+	}
+
+}
 bool detect_coincraft_desk(void)
 {
 	static const uint8_t mcp4x_mapping[] = { 0x2c, 0x2b, 0x2a, 0x29, 0x28 };
@@ -760,8 +886,7 @@ bool detect_coincraft_desk(void)
 		if (mcp == NULL)
 			continue;
 
-		if (A1_config_options.wiper != 0)
-			mcp->set_wiper(mcp, 0, A1_config_options.wiper);
+		set_ccd_wiper(mcp, board_id);
 
 		applog(LOG_WARNING, "checking board %d...", board_id);
 		board_selector->select(board_id);
@@ -789,6 +914,48 @@ bool detect_coincraft_desk(void)
 		return false;
 
 	applog(LOG_WARNING, "Detected CoinCraft Desk with %d boards",
+	       boards_detected);
+	return true;
+}
+
+bool detect_coincraft_blade(void)
+{
+	board_selector = ccb_board_selector_init();
+	if (board_selector == NULL) {
+		applog(LOG_INFO, "No CoinCrafd Blade backplane detected.");
+		return false;
+	}
+	board_selector->reset_all();
+
+	int boards_detected = 0;
+	int board_id;
+	for (board_id = 0; board_id < CCB_MAX_CHAINS; board_id++) {
+		applog(LOG_WARNING, "checking board %d...", board_id);
+		board_selector->select(board_id);
+
+		struct A1_chain *a1 = init_A1_chain(spi, board_id);
+		board_selector->release();
+		if (a1 == NULL)
+			continue;
+
+		struct cgpu_info *cgpu = malloc(sizeof(*cgpu));
+		assert(cgpu != NULL);
+
+		memset(cgpu, 0, sizeof(*cgpu));
+		cgpu->drv = &bitmineA1_drv;
+		cgpu->name = "BitmineA1.CCB";
+		cgpu->threads = 1;
+
+		cgpu->device_data = a1;
+
+		a1->cgpu = cgpu;
+		add_cgpu(cgpu);
+		boards_detected++;
+	}
+	if (boards_detected == 0)
+		return false;
+
+	applog(LOG_WARNING, "Detected CoinCraft Blade with %d boards",
 	       boards_detected);
 	return true;
 }
@@ -856,34 +1023,7 @@ void A1_detect(bool hotplug)
 	if (hotplug)
 		return;
 
-	/* parse bimine-a1-options */
-	if (opt_bitmine_a1_options != NULL && parsed_config_options == NULL) {
-		int ref_clk = 0;
-		int sys_clk = 0;
-		int spi_clk = 0;
-		int override_chip_num = 0;
-		int wiper = 0;
-
-		sscanf(opt_bitmine_a1_options, "%d:%d:%d:%d:%d",
-		       &ref_clk, &sys_clk, &spi_clk,  &override_chip_num,
-		       &wiper);
-		if (ref_clk != 0)
-			A1_config_options.ref_clk_khz = ref_clk;
-		if (sys_clk != 0) {
-			if (sys_clk < 100000)
-				quit(1, "system clock must be above 100MHz");
-			A1_config_options.sys_clk_khz = sys_clk;
-		}
-		if (spi_clk != 0)
-			A1_config_options.spi_clk_khz = spi_clk;
-		if (override_chip_num != 0)
-			A1_config_options.override_chip_num = override_chip_num;
-		if (wiper != 0)
-			A1_config_options.wiper = wiper;
-
-		/* config options are global, scan them once */
-		parsed_config_options = &A1_config_options;
-	}
+	A1_parse_options();
 	applog(LOG_DEBUG, "A1 detect");
 
 	/* register global SPI context */
@@ -897,6 +1037,8 @@ void A1_detect(bool hotplug)
 	/* detect and register supported products */
 	if (detect_coincraft_desk())
 		return;
+	if (detect_coincraft_blade())
+		return;
 	if (detect_coincraft_rig_v3())
 		return;
 	if (detect_single_chain())
@@ -907,13 +1049,14 @@ void A1_detect(bool hotplug)
 
 #define TEMP_UPDATE_INT_MS	2000
 #define TEMP_THROTTLE_SLEEP_MS	5000
+#define IDLE_SLEEP_MS		120
 static int64_t A1_scanwork(struct thr_info *thr)
 {
 	int i;
 	struct cgpu_info *cgpu = thr->cgpu;
 	struct A1_chain *a1 = cgpu->device_data;
 	int32_t nonce_ranges_processed = 0;
-	int sleep_ms = 40;
+	int sleep_ms = IDLE_SLEEP_MS;
 
 	if (a1->num_cores == 0) {
 		cgpu->deven = DEV_DISABLED;
@@ -1003,9 +1146,19 @@ static int64_t A1_scanwork(struct thr_info *thr)
 			applog(LOG_ERR, "%d: chip %d: invalid state = 2",
 			       cid, c);
 			continue;
-		case 1:
-			/* fall through */
 		case 0:
+			work = wq_dequeue(&a1->active_wq);
+			if (work == NULL) {
+				applog(LOG_INFO, "%d: chip %d: work underflow",
+				       cid, c);
+				break;
+			}
+			if (set_work(a1, c, work, qbuff)) {
+				chip->nonce_ranges_done++;
+				nonce_ranges_processed++;
+			}
+			/* fall through */
+		case 1:
 			work_updated = true;
 			work = wq_dequeue(&a1->active_wq);
 			if (work == NULL) {
