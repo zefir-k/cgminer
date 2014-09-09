@@ -31,9 +31,11 @@
 static struct board_selector ccb_selector;
 
 static struct i2c_ctx *U1_tca9535;
-static uint8_t chain_mask = 0xff;
+static uint8_t board_mask = 0xff;
 static uint8_t active_chain = 255;
+static uint8_t active_board = 255;
 static pthread_mutex_t lock;
+static uint8_t last_temp[CCB_MAX_CHAINS / 2];
 
 static void ccb_unlock(void)
 {
@@ -72,8 +74,10 @@ static bool ccb_select(uint8_t chain)
 		return true;
 
 	active_chain = chain;
-	chain_mask = 1 << active_chain;
-	return U1_tca9535->write(U1_tca9535, 0x03, ~chain_mask);
+	active_board = chain / 2;
+
+	board_mask = 0x80 >> active_board;
+	return U1_tca9535->write(U1_tca9535, 0x03, ~board_mask);
 }
 
 static bool __ccb_board_selector_reset(uint8_t mask)
@@ -89,7 +93,7 @@ static bool __ccb_board_selector_reset(uint8_t mask)
 // we assume we are already holding the mutex
 static bool ccb_reset(void)
 {
-	return __ccb_board_selector_reset(chain_mask);
+	return __ccb_board_selector_reset(board_mask);
 }
 
 static bool ccb_reset_all(void)
@@ -105,10 +109,14 @@ static uint8_t ccb_get_temp(uint8_t sensor_id)
 	if (sensor_id != 0)
 		return 0;
 
+	/* no need to read same sensor twice */
+	if (active_chain & 1)
+		return last_temp[active_board];
+
 	static uint8_t temp_slaves[8] = {
 		0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f
 	};
-	struct i2c_ctx *t = i2c_slave_open(I2C_BUS, temp_slaves[active_chain]);
+	struct i2c_ctx *t = i2c_slave_open(I2C_BUS, temp_slaves[active_board]);
 	if (t == NULL)
 		return 0;
 
@@ -116,6 +124,17 @@ static uint8_t ccb_get_temp(uint8_t sensor_id)
 	if (!t->read(t, 0, &retval))
 		retval = 0;
 	t->exit(t);
+	if (retval > 100) {
+		applog(LOG_WARNING, "CCB board %d: invalid temp 0x%x",
+		       active_board, retval);
+		if (retval & 0x80) {
+			retval -= 0x80;
+			applog(LOG_WARNING, "CCB board %d: fixed to 0x%x",
+			       active_board, retval);
+		} else
+			retval = 0;
+	}
+	last_temp[active_board] = retval;
 	return retval;
 }
 

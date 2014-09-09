@@ -27,7 +27,7 @@
 
 /* one global board_selector and spi context is enough */
 static struct board_selector *board_selector;
-static struct spi_ctx *spi;
+static struct spi_ctx *spi0, *spi1;
 
 /********** work queue */
 static bool wq_enqueue(struct work_queue *wq, struct work *work)
@@ -94,7 +94,7 @@ struct A1_config_options A1_config_options = {
 /* override values with --bitmine-a1-options ref:sys:spi: - use 0 for default */
 static struct A1_config_options *parsed_config_options;
 
-#define MAX_BOARDS 8
+#define MAX_BOARDS 16
 struct A1_extra_options {
 	int board_mask;
 	int override_diff; /* -1 = real diff */
@@ -773,7 +773,7 @@ struct A1_chain *init_A1_chain(struct spi_ctx *ctx, int chain_id)
 {
 	if (extra_options.board_mask & (1 << chain_id)) {
 		applog(LOG_WARNING, "%d: bypassing chain", chain_id);
-		return false;;
+		return false;
 	}
 
 	int i;
@@ -834,7 +834,7 @@ static bool detect_single_chain(void)
 {
 	board_selector = (struct board_selector*)&dummy_board_selector;
 	applog(LOG_WARNING, "A1: checking single chain");
-	struct A1_chain *a1 = init_A1_chain(spi, 0);
+	struct A1_chain *a1 = init_A1_chain(spi0, 0);
 	if (a1 == NULL)
 		return false;
 
@@ -891,7 +891,7 @@ bool detect_coincraft_desk(void)
 		applog(LOG_WARNING, "checking board %d...", board_id);
 		board_selector->select(board_id);
 
-		struct A1_chain *a1 = init_A1_chain(spi, board_id);
+		struct A1_chain *a1 = init_A1_chain(spi0, board_id);
 		board_selector->release();
 		if (a1 == NULL)
 			continue;
@@ -933,6 +933,7 @@ bool detect_coincraft_blade(void)
 		applog(LOG_WARNING, "checking board %d...", board_id);
 		board_selector->select(board_id);
 
+		struct spi_ctx *spi = (board_id & 1) ? spi1 : spi0;
 		struct A1_chain *a1 = init_A1_chain(spi, board_id);
 		board_selector->release();
 		if (a1 == NULL)
@@ -975,7 +976,7 @@ bool detect_coincraft_rig_v3(void)
 		if (!board_selector->select(c))
 			continue;
 
-		struct A1_chain *a1 = init_A1_chain(spi, c);
+		struct A1_chain *a1 = init_A1_chain(spi0, c);
 		board_selector->release();
 
 		if (a1 == NULL)
@@ -1030,8 +1031,10 @@ void A1_detect(bool hotplug)
 	struct spi_config cfg = default_spi_config;
 	cfg.mode = SPI_MODE_1;
 	cfg.speed = A1_config_options.spi_clk_khz * 1000;
-	spi = spi_init(&cfg);
-	if (spi == NULL)
+	spi0 = spi_init(&cfg);
+	cfg.cs_line = 1;
+	spi1 = spi_init(&cfg);
+	if (spi0 == NULL || spi1 == NULL)
 		return;
 
 	/* detect and register supported products */
@@ -1044,7 +1047,8 @@ void A1_detect(bool hotplug)
 	if (detect_single_chain())
 		return;
 	/* release SPI context if no A1 products found */
-	spi_exit(spi);
+	spi_exit(spi0);
+	spi_exit(spi1);
 }
 
 #define TEMP_UPDATE_INT_MS	2000
@@ -1191,7 +1195,7 @@ done:
 		       cid, nonce_ranges_processed);
 	}
 	/* in case of no progress, prevent busy looping */
-	if (!work_updated)
+//	if (!work_updated)
 		cgsleep_ms(sleep_ms);
 
 	return (int64_t)nonce_ranges_processed << 32;
