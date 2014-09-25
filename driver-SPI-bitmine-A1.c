@@ -101,6 +101,7 @@ struct A1_extra_options {
 	int sys_clk_khz[MAX_BOARDS];
 	int wiper[MAX_BOARDS];
 	int chip_bitmask[MAX_BOARDS];
+	int spi_clk_khz[MAX_BOARDS];
 };
 
 static struct A1_extra_options extra_options;
@@ -111,13 +112,16 @@ static void A1_parse_option_array(char *opt, int *c, char *info, bool is_hex)
 
 	if (opt[0] == 0)
 		return;
-	const char *format = is_hex ? "%x-%x-%x-%x-%x-%x-%x-%x" :
-				      "%d-%d-%d-%d-%d-%d-%d-%d";
+	const char *format = is_hex ?
+		"%x-%x-%x-%x-%x-%x-%x-%x-%x-%x-%x-%x-%x-%x-%x-%x" :
+		"%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d";
 	memset(m, 0, sizeof(m));
 	applog(LOG_DEBUG, "%s: %s", info, opt);
 	int n = sscanf(opt, format,
 			m + 0, m + 1, m + 2, m + 3,
-			m + 4, m + 5, m + 6, m + 7);
+			m + 4, m + 5, m + 6, m + 7,
+			m + 8, m + 9, m + 10, m + 11,
+			m + 12, m + 13, m + 14, m + 15);
 	if (n > 0) {
 		int i;
 		int last = m[n - 1];
@@ -127,7 +131,8 @@ static void A1_parse_option_array(char *opt, int *c, char *info, bool is_hex)
 		char prefix[80];
 		sprintf(prefix, "%s: %d entries scanned: %s", info, n, format);
 		applog(LOG_WARNING, prefix,
-			c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+			c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+			c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]);
 	}
 }
 
@@ -149,11 +154,12 @@ static void A1_parse_options(void)
 	static char clk_tmp[128];
 	static char wiper_tmp[128];
 	static char cmask_tmp[128];
+	static char sclk_tmp[128];
 
-	sscanf(opt_bitmine_a1_options, "%d:%d:%d:%d:%d:%d:%x %s %s %s",
+	sscanf(opt_bitmine_a1_options, "%d:%d:%d:%d:%d:%d:%x %s %s %s %s",
 	       &ref_clk, &sys_clk, &spi_clk, &override_chip_num,
 	       &wiper, &override_diff, &board_mask,
-	       clk_tmp, wiper_tmp, cmask_tmp);
+	       clk_tmp, wiper_tmp, cmask_tmp, sclk_tmp);
 	if (ref_clk != 0)
 		A1_config_options.ref_clk_khz = ref_clk;
 	if (sys_clk != 0) {
@@ -182,6 +188,7 @@ static void A1_parse_options(void)
 	A1_parse_option_array(clk_tmp, eo->sys_clk_khz, "sys_clk", false);
 	A1_parse_option_array(wiper_tmp, eo->wiper, "wiper", true);
 	A1_parse_option_array(cmask_tmp, eo->chip_bitmask, "chip_bitmask", true);
+	A1_parse_option_array(sclk_tmp, eo->spi_clk_khz, "spi_clk", false);
 	/* config options are global, scan them once */
 	parsed_config_options = &A1_config_options;
 }
@@ -267,6 +274,16 @@ static uint8_t *exec_cmd(struct A1_chain *a1,
 
 
 /********** A1 SPI commands */
+static uint8_t *cmd_BIST_START_BCAST(struct A1_chain *a1)
+{
+	uint8_t *ret = exec_cmd(a1, A1_BIST_START, 0x00, NULL, 2, 0);
+	if (ret == NULL || ret[0] != A1_BIST_START) {
+		applog(LOG_ERR, "%d: cmd_BIST_START_BCAST failed", a1->chain_id);
+		return NULL;
+	}
+	return ret;
+}
+
 static uint8_t *cmd_BIST_FIX_BCAST(struct A1_chain *a1)
 {
 	uint8_t *ret = exec_cmd(a1, A1_BIST_FIX, 0x00, NULL, 0, 0);
@@ -439,6 +456,7 @@ static uint8_t *get_pll_reg(struct A1_chain *a1, int ref_clock_khz,
 	}
 	writereg[0] = (post_div << 6) | (pre_div << 1) | (fb_div >> 8);
 	writereg[1] = fb_div & 0xff;
+
 	applog(LOG_WARNING, "%d: setting PLL: pre_div=%d, post_div=%d, "
 	       "fb_div=%d: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x", cid,
 	       pre_div, post_div, fb_div,
@@ -525,16 +543,12 @@ static bool check_chip(struct A1_chain *a1, int i)
 	return true;
 }
 
-/*
- * BIST_START works only once after HW reset, on subsequent calls it
- * returns 0 as number of chips.
- */
 static int chain_detect(struct A1_chain *a1)
 {
 	int tx_len = 6;
 
 	memset(a1->spi_tx, 0, tx_len);
-	a1->spi_tx[0] = A1_BIST_START;
+	a1->spi_tx[0] = A1_RESET;
 	a1->spi_tx[1] = 0;
 
 	if (!spi_transfer(a1->spi_ctx, a1->spi_tx, a1->spi_rx, tx_len))
@@ -546,17 +560,8 @@ static int chain_detect(struct A1_chain *a1)
 	int cid = a1->chain_id;
 	int max_poll_words = MAX_CHAIN_LENGTH * 2;
 	for(i = 1; i < max_poll_words; i++) {
-		if (a1->spi_rx[0] == A1_BIST_START && a1->spi_rx[1] == 0) {
-			spi_transfer(a1->spi_ctx, NULL, a1->spi_rx, 2);
-			hexdump("RX", a1->spi_rx, 2);
-			uint8_t n = a1->spi_rx[1];
+		if (a1->spi_rx[0] == A1_RESET && a1->spi_rx[1] == 0) {
 			a1->num_chips = (i / 2) + 1;
-			if (a1->num_chips != n) {
-				applog(LOG_ERR, "%d: enumeration: %d <-> %d",
-				       cid, a1->num_chips, n);
-				if (n != 0)
-					a1->num_chips = n;
-			}
 			applog(LOG_WARNING, "%d: detected %d chips",
 			       cid, a1->num_chips);
 			return a1->num_chips;
@@ -754,8 +759,8 @@ static bool get_nonce(struct A1_chain *a1, uint8_t *nonce,
 /* reset input work queues in chip chain */
 static bool abort_work(struct A1_chain *a1)
 {
-	/* drop jobs already queued: reset strategy 0xed */
-	return cmd_RESET_BCAST(a1, 0xed);
+	/* drop jobs already queued: reset strategy 0xe5 */
+	return cmd_RESET_BCAST(a1, 0xe5);
 }
 
 /********** driver interface */
@@ -767,6 +772,15 @@ void exit_A1_chain(struct A1_chain *a1)
 	a1->chips = NULL;
 	a1->spi_ctx = NULL;
 	free(a1);
+}
+
+static void set_spi_clk(struct A1_chain *a1)
+{
+	int cid = a1->chain_id;
+	if (extra_options.spi_clk_khz[cid] != 0)
+		a1->spi_ctx->config.speed = extra_options.spi_clk_khz[cid] * 1000;
+	else
+		a1->spi_ctx->config.speed = A1_config_options.spi_clk_khz * 1000;
 }
 
 struct A1_chain *init_A1_chain(struct spi_ctx *ctx, int chain_id)
@@ -793,11 +807,26 @@ struct A1_chain *init_A1_chain(struct spi_ctx *ctx, int chain_id)
 	       a1->spi_ctx->config.bus, a1->spi_ctx->config.cs_line,
 	       a1->chain_id, a1->num_chips);
 
+	// do the BIST with a clock-multiplier of 12.5 (200MHz @ 16MHz)
+	static uint8_t initial_pll[6] = { 0x82, 0x19, 0x21, 0x84, };
+	// start with a 100kHz SPI clock
+	a1->spi_ctx->config.speed = 100 * 1000;
+
+	if (cmd_WRITE_REG(a1, 0, initial_pll) == NULL)
+		goto failure;
+
+	if (cmd_BIST_START_BCAST(a1) == NULL)
+		goto failure;
+
 	int sys_clk = A1_config_options.sys_clk_khz;
 	if (extra_options.sys_clk_khz[a1->chain_id] != 0)
 		sys_clk = extra_options.sys_clk_khz[a1->chain_id];
 	if (!set_pll_config(a1, 0, A1_config_options.ref_clk_khz, sys_clk))
 		goto failure;
+
+	set_spi_clk(a1);
+	applog(LOG_WARNING, "%d: spi_clk = %d kHz",
+	       chain_id, a1->spi_ctx->config.speed / 1000);
 
 	/* override max number of active chips if requested */
 	a1->num_active_chips = a1->num_chips;
@@ -922,7 +951,7 @@ bool detect_coincraft_blade(void)
 {
 	board_selector = ccb_board_selector_init();
 	if (board_selector == NULL) {
-		applog(LOG_INFO, "No CoinCrafd Blade backplane detected.");
+		applog(LOG_INFO, "No CoinCraft Blade backplane detected.");
 		return false;
 	}
 	board_selector->reset_all();
@@ -930,8 +959,13 @@ bool detect_coincraft_blade(void)
 	int boards_detected = 0;
 	int board_id;
 	for (board_id = 0; board_id < CCB_MAX_CHAINS; board_id++) {
+		if (extra_options.board_mask & (1 << board_id))
+			continue;
 		applog(LOG_WARNING, "checking board %d...", board_id);
 		board_selector->select(board_id);
+
+//		board_selector->reset();
+//		cgsleep_ms(250);
 
 		struct spi_ctx *spi = (board_id & 1) ? spi1 : spi0;
 		struct A1_chain *a1 = init_A1_chain(spi, board_id);
@@ -1067,6 +1101,8 @@ static int64_t A1_scanwork(struct thr_info *thr)
 		return 0;
 	}
 	board_selector->select(a1->chain_id);
+
+	set_spi_clk(a1);
 
 	applog(LOG_DEBUG, "A1 running scanwork");
 
@@ -1227,6 +1263,8 @@ static void A1_flush_work(struct cgpu_info *cgpu)
 	struct A1_chain *a1 = cgpu->device_data;
 	int cid = a1->chain_id;
 	board_selector->select(cid);
+
+	set_spi_clk(a1);
 
 	applog(LOG_DEBUG, "%d: A1 running flushwork", cid);
 

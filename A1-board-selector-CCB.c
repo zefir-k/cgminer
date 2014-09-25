@@ -74,15 +74,21 @@ static bool ccb_select(uint8_t chain)
 		return true;
 
 	active_chain = chain;
+	if (active_board == chain / 2)
+		return true;
+
 	active_board = chain / 2;
 
-	board_mask = 0x80 >> active_board;
-	return U1_tca9535->write(U1_tca9535, 0x03, ~board_mask);
+	board_mask = 1 << active_board;
+
+	return	U1_tca9535->write(U1_tca9535, 0x03, 0xff) &&
+		U1_tca9535->write(U1_tca9535, 0x03, ~(0x80 >> active_board));
 }
 
 static bool __ccb_board_selector_reset(uint8_t mask)
 {
-	if (!U1_tca9535->write(U1_tca9535, 0x02, mask))
+	if (!U1_tca9535->write(U1_tca9535, 0x02, 0x00) ||
+	    !U1_tca9535->write(U1_tca9535, 0x02, mask))
 		return false;
 	cgsleep_ms(RESET_LOW_TIME_MS);
 	if (!U1_tca9535->write(U1_tca9535, 0x02, 0x00))
@@ -93,6 +99,8 @@ static bool __ccb_board_selector_reset(uint8_t mask)
 // we assume we are already holding the mutex
 static bool ccb_reset(void)
 {
+	if (active_chain & 1)
+		return true;
 	return __ccb_board_selector_reset(board_mask);
 }
 
