@@ -95,6 +95,7 @@ endif
 
 if HAS_BITMINE_A1
 cgminer_SOURCES += driver-SPI-bitmine-A1.c
+cgminer_SOURCES += A1-utils.c A1-layer-SPI.c
 cgminer_SOURCES += spi-context.c spi-context.h
 cgminer_SOURCES += A1-common.h
 cgminer_SOURCES += A1-board-selector.h

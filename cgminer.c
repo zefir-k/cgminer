@@ -238,6 +238,7 @@ char *opt_drillbit_auto = NULL;
 #endif
 char *opt_bab_options = NULL;
 #ifdef USE_BITMINE_A1
+#include "A1-common.h"
 char *opt_bitmine_a1_options = NULL;
 #endif
 #if defined(USE_ANT_S1) || defined(USE_ANT_S2)
@@ -1238,6 +1239,42 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--bitmine-a1-options",
 		     opt_set_charp, NULL, &opt_bitmine_a1_options,
 		     "Bitmine A1 options ref_clk_khz:sys_clk_khz:spi_clk_khz:override_chip_num"),
+	OPT_WITH_ARG("--bitmine-a1-ref_clk",
+		     opt_set_intval, NULL, &A1_config_options.ref_clk_khz,
+		     "Bitmine A1 ref_clk in kHz, default 16'000"),
+	OPT_WITH_ARG("--bitmine-a1-sys_clk",
+		     opt_set_intval, NULL, &A1_config_options.sys_clk_khz,
+		     "Bitmine A1 sys_clk in kHz, default 800'000"),
+	OPT_WITH_ARG("--bitmine-a1-spi_clk",
+		     opt_set_intval, NULL, &A1_config_options.spi_clk_khz,
+		     "Bitmine A1 SPI clock in kHz, default 2'000"),
+	OPT_WITH_ARG("--bitmine-a1-override_diff",
+		     opt_set_intval, NULL, &A1_config_options.override_diff,
+		     "Bitmine A1 diff override, with 0 = diff1, -1 = real diff; default = 0"),
+	OPT_WITH_ARG("--bitmine-a1-chain_mask",
+		     opt_set_intval, NULL, &A1_config_options.chain_mask,
+		     "Bitmine A1 chain mask, bitmask to disable chains"),
+	OPT_WITHOUT_ARG("--bitmine-a1-enable_autotune",
+			opt_set_bool, &A1_config_options.enable_auto_tune,
+			"Bitmine A1: enable per chip sys_clk autotune"),
+	OPT_WITH_ARG("--bitmine-a1-lower-ratio",
+		     opt_set_intval, NULL, &A1_config_options.lower_ratio_pm,
+		     "Bitmine A1 lower error ratio (in permill) for autotune, default = 3"),
+	OPT_WITH_ARG("--bitmine-a1-upper-ratio",
+		     opt_set_intval, NULL, &A1_config_options.upper_ratio_pm,
+		     "Bitmine A1 upper error ratio (in permill) for autotune, default = 20"),
+	OPT_WITH_ARG("--bitmine-a1-lower-clk",
+		     opt_set_intval, NULL, &A1_config_options.lower_clk_khz,
+		     "Bitmine A1 lower sys_clk (in kHz) for autotune, default = 400'000"),
+	OPT_WITH_ARG("--bitmine-a1-upper-clk",
+		     opt_set_intval, NULL, &A1_config_options.upper_clk_khz,
+		     "Bitmine A1 upper sys_clk (in kHz) for autotune, default = 1'100'000"),
+	OPT_WITH_ARG("--bitmine-a1-stats",
+		     opt_set_charp, NULL, &A1_config_options.stats_fname,
+		     "Bitmine A1 stats filename, no stats ouput if not given"),
+	OPT_WITH_ARG("--bitmine-a1-config",
+		     opt_set_charp, NULL, &A1_config_options.config_fname,
+		     "Bitmine A1 JSON config filename"),
 #endif
 #ifdef USE_BITFURY
 	OPT_WITH_ARG("--bxf-bits",
