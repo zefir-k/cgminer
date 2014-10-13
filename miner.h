@@ -1005,9 +1005,6 @@ extern char *opt_drillbit_auto;
 #ifdef USE_BAB
 extern char *opt_bab_options;
 #endif
-#ifdef USE_BITMINE_A1
-extern char *opt_bitmine_a1_options;
-#endif
 #ifdef USE_ANT_S1
 extern char *opt_bitmain_options;
 extern bool opt_bitmain_hwerror;

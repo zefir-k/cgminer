@@ -22,7 +22,7 @@
 #include "util.h"
 
 
-#include "A1-common.h"
+#include "A1-private.h"
 
 void flush_spi(struct A1_chain *a1)
 {
@@ -86,6 +86,26 @@ uint8_t *cmd_BIST_START_BCAST(struct A1_chain *a1)
 uint8_t *cmd_BIST_FIX_BCAST(struct A1_chain *a1)
 {
 	uint8_t *ret = exec_cmd(a1, A1_BIST_FIX, 0x00, NULL, 0, 0);
+	if (ret == NULL || ret[0] != A1_BIST_FIX) {
+		applog(LOG_ERR, "%d: cmd_BIST_FIX_BCAST failed", a1->chain_id);
+		return NULL;
+	}
+	return ret;
+}
+
+uint8_t *cmd_BIST_START(struct A1_chain *a1, uint8_t chip)
+{
+	uint8_t *ret = exec_cmd(a1, A1_BIST_START, chip, NULL, 2, 0);
+	if (ret == NULL || ret[0] != A1_BIST_START) {
+		applog(LOG_ERR, "%d: cmd_BIST_START_BCAST failed", a1->chain_id);
+		return NULL;
+	}
+	return ret;
+}
+
+uint8_t *cmd_BIST_FIX(struct A1_chain *a1, uint8_t chip)
+{
+	uint8_t *ret = exec_cmd(a1, A1_BIST_FIX, chip, NULL, 0, 0);
 	if (ret == NULL || ret[0] != A1_BIST_FIX) {
 		applog(LOG_ERR, "%d: cmd_BIST_FIX_BCAST failed", a1->chain_id);
 		return NULL;

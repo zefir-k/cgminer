@@ -239,7 +239,6 @@ char *opt_drillbit_auto = NULL;
 char *opt_bab_options = NULL;
 #ifdef USE_BITMINE_A1
 #include "A1-common.h"
-char *opt_bitmine_a1_options = NULL;
 #endif
 #if defined(USE_ANT_S1) || defined(USE_ANT_S2)
 char *opt_bitmain_options;
