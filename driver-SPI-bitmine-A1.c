@@ -28,6 +28,8 @@
 #include "A1-trimpot-mcp4x.h"
 
 
+
+static struct A1_board a1_boards[MAX_BOARDS];
 static void A1_push_nonce_stats(struct A1_chip *chip);
 
 
@@ -177,7 +179,7 @@ static bool check_chip(struct A1_chain *a1, int i)
 	int chip_id = i + 1;
 	int cid = a1->chain_id;
 
-	chip->a1 = a1;
+	chip->chain = a1;
 	chip->chip_id = chip_id;
 	chip->at_current.sys_clk = a1->sys_clk;
 	/* reset twice for current and prev stats */
@@ -192,7 +194,7 @@ static bool check_chip(struct A1_chain *a1, int i)
 		return false;
 	}
 
-	if (!cmd_RESET(chip->a1, chip->chip_id, 0xe1)) {
+	if (!cmd_RESET(chip->chain, chip->chip_id, 0xe1)) {
 		applog(LOG_WARNING, "%2d/%2d: chip reset failed",
 		       cid, chip_id);
 		chip->num_cores = 0;
@@ -351,7 +353,7 @@ static void flush_chip(struct A1_chip *chip)
 		struct work *work = chip->work[j];
 		if (work == NULL)
 			continue;
-		work_completed(chip->a1->cgpu, work);
+		work_completed(chip->chain->board->cgpu, work);
 		chip->work[j] = NULL;
 	}
 	chip->last_queued_id = 0;
@@ -360,20 +362,20 @@ static void flush_chip(struct A1_chip *chip)
 
 static bool restart_chip(struct A1_chip *chip, int new_clk)
 {
-	if (!cmd_RESET(chip->a1, chip->chip_id, 0xe5)) {
+	if (!cmd_RESET(chip->chain, chip->chip_id, 0xe5)) {
 		applog(LOG_WARNING, "%2d/%2d: chip reset failed",
-		       chip->a1->chain_id, chip->chip_id);
+		       chip->chain->chain_id, chip->chip_id);
 		return false;
 	}
 	flush_chip(chip);
-	return set_pll_config(chip->a1, chip->chip_id,
+	return set_pll_config(chip->chain, chip->chip_id,
 			      A1_config_options.ref_clk_khz, new_clk);
 
 }
 ///////////////////////////////////////////////////////////////////////////////
 
 
-#define BAD_NONCE_COUNT 5
+#define BAD_NONCE_COUNT 10
 #define NONCE_INTERVAL_N 200
 
 static void A1_reset_nonce_stats(struct A1_chip *chip)
@@ -424,7 +426,7 @@ static void log_stat(struct A1_chip *chip, int ratio, bool bad)
 		return;
 	fprintf(stats_file, "%s %s %d/%d: %d/%d-%d, %d (%d)\n",
 		time_string(), bad ? "---" : "+++",
-		chip->a1->chain_id, chip->chip_id,
+		chip->chain->chain_id, chip->chip_id,
 		chip->at_current.shares_nok, chip->at_current.shares_ok,
 		ratio, chip->at_current.sys_clk / 1000,
 		chip->at_prev.sys_clk / 1000);
@@ -437,7 +439,7 @@ static void log_change(struct A1_chip *chip, int ratio)
 	fprintf(stats_file, "%s %s CHANGE: %d/%d: %d/%d/%d %d->%d\n",
 		time_string(),
 		chip->at_prev.sys_clk < chip->at_current.sys_clk ? "+++" : "---",
-		chip->a1->chain_id, chip->chip_id,
+		chip->chain->chain_id, chip->chip_id,
 		chip->at_prev.shares_nok, chip->at_prev.shares_ok, ratio,
 		chip->at_prev.sys_clk / 1000, chip->at_current.sys_clk / 1000);
 	fflush(stats_file);
@@ -503,7 +505,7 @@ static bool adjust_clock(struct A1_chip *chip, int clock_delta, int ratio)
 	fprintf(stats_file, "%s %s ADJUST %d/%d: %d/%d, %d/%d/%d\n",
 		time_string(),
 		clock_delta > 0 ? "+++" : "---",
-		chip->a1->chain_id, chip->chip_id,
+		chip->chain->chain_id, chip->chip_id,
 		chip->at_current.sys_clk, chip->at_prev.sys_clk,
 		clock_delta, prev_delta, new_delta);
 
@@ -545,7 +547,7 @@ static bool add_nonce_bad(struct A1_chip *chip)
 
 		if (stats_file != NULL)
 			fprintf(stats_file, "%s %d/%d: limit reached: clk=%d\n",
-				time_string(), chip->a1->chain_id, chip->chip_id,
+				time_string(), chip->chain->chain_id, chip->chip_id,
 				chip->at_current.sys_clk);
 	}
 	A1_reset_nonce_stats(chip);
@@ -654,14 +656,14 @@ static bool set_work(struct A1_chain *a1, uint8_t chip_id, struct work *work,
 		       cid, chip_id, job_id, queue_states);
 
 	if (chip->work[chip->last_queued_id] != NULL) {
-		work_completed(a1->cgpu, chip->work[chip->last_queued_id]);
+		work_completed(a1->board->cgpu, chip->work[chip->last_queued_id]);
 		chip->work[chip->last_queued_id] = NULL;
 		retval = true;
 	}
 	uint8_t *jobdata = create_job(chip_id, job_id, work);
 	if (!cmd_WRITE_JOB(a1, chip_id, jobdata)) {
 		/* give back work */
-		work_completed(a1->cgpu, work);
+		work_completed(a1->board->cgpu, work);
 
 		applog(LOG_ERR, "%2d/%2d: failed to set work id %d",
 		       cid, chip_id, job_id);
@@ -784,7 +786,6 @@ struct A1_chain *init_A1_chain(struct spi_ctx *ctx, int chain_id)
 	applog(LOG_WARNING, "%d: found %d chips with total %d active cores",
 	       a1->chain_id, a1->num_active_chips, a1->num_cores);
 
-	mutex_init(&a1->lock);
 	INIT_LIST_HEAD(&a1->active_wq.head);
 
 	return a1;
@@ -794,8 +795,15 @@ failure:
 	return NULL;
 }
 
-static void A1_add_cgpu(struct A1_chain *a1, const char *name)
+static bool A1_add_board(int board_id, const char *name)
 {
+	if (board_id >= MAX_BOARDS)
+		return false;
+
+	struct A1_board *a1b = &a1_boards[board_id];
+	if (a1b->num_chains == 0)
+		return false;
+
 	struct cgpu_info *cgpu = malloc(sizeof(*cgpu));
 	assert(cgpu != NULL);
 
@@ -804,10 +812,25 @@ static void A1_add_cgpu(struct A1_chain *a1, const char *name)
 	cgpu->name = (char*)name;
 	cgpu->threads = 1;
 
-	cgpu->device_data = a1;
+	cgpu->device_data = a1b;
+	a1b->cgpu = cgpu;
+	a1b->board_id = board_id;
 
-	a1->cgpu = cgpu;
+	mutex_init(&a1b->lock);
 	add_cgpu(cgpu);
+	return true;
+}
+static bool A1_add_chain(int board_id, struct A1_chain *a1)
+{
+	if (board_id >= MAX_BOARDS)
+		return false;
+	struct A1_board *a1b = &a1_boards[board_id];
+	a1b->chain[a1b->num_chains++] = a1;
+	a1b->num_active_chains++;
+	a1->board = a1b;
+	applog(LOG_WARNING, "added chain to board %d: => %d",
+	       board_id, a1b->num_chains);
+	return true;
 }
 static bool detect_single_chain(void)
 {
@@ -817,7 +840,10 @@ static bool detect_single_chain(void)
 	if (a1 == NULL)
 		return false;
 
-	A1_add_cgpu(a1, "BitmineA1.SingleChain");
+	if (!A1_add_chain(0, a1))
+		return false;
+	if (!A1_add_board(0, "BitmineA1.SingleChain"))
+		return false;
 	applog(LOG_WARNING, "Detected single A1 chain with %d chips / %d cores",
 	       a1->num_active_chips, a1->num_cores);
 	return true;
@@ -864,7 +890,10 @@ bool detect_coincraft_desk(void)
 		if (a1 == NULL)
 			continue;
 
-		A1_add_cgpu(a1, "BitmineA1.CCD");
+		if (!A1_add_chain(board_id, a1))
+			return false;
+		if (!A1_add_board(board_id, "BitmineA1.CCD"))
+			return false;
 		boards_detected++;
 	}
 	if (boards_detected == 0)
@@ -886,23 +915,28 @@ bool detect_coincraft_blade(void)
 
 	int boards_detected = 0;
 	int board_id;
-	for (board_id = 0; board_id < CCB_MAX_CHAINS; board_id++) {
-		if (A1_config_options.chain_mask & (1 << board_id))
-			continue;
-		applog(LOG_WARNING, "checking board %d...", board_id);
-		board_selector->select(board_id);
+	for (board_id = 0; board_id < CCB_MAX_BOARDS; board_id++) {
+		int chain_id;
+		for (chain_id = 0; chain_id < 2; chain_id ++) {
+			int cid = board_id * 2 + chain_id;
+			if (A1_config_options.chain_mask & (1 << cid))
+				continue;
+			applog(LOG_WARNING, "CCB: checking %d...", cid);
+			board_selector->select(board_id);
 
-//		board_selector->reset();
-//		cgsleep_ms(250);
+	//		board_selector->reset();
+	//		cgsleep_ms(250);
 
-		struct spi_ctx *spi = (board_id & 1) ? spi1 : spi0;
-		struct A1_chain *a1 = init_A1_chain(spi, board_id);
-		board_selector->release();
-		if (a1 == NULL)
-			continue;
+			struct spi_ctx *spi = (chain_id == 1) ? spi1 : spi0;
+			struct A1_chain *a1 = init_A1_chain(spi, board_id);
+			board_selector->release();
+			if (a1 == NULL)
+				continue;
 
-		A1_add_cgpu(a1, "BitmineA1.CCB");
-		boards_detected++;
+			A1_add_chain(board_id, a1);
+		}
+		if (A1_add_board(board_id, "BitmineA1.CCB"))
+			boards_detected++;
 	}
 	if (boards_detected == 0)
 		return false;
@@ -946,8 +980,8 @@ bool detect_coincraft_rig_v3(void)
 			}
 		}
 
-		A1_add_cgpu(a1, "BitmineA1.CCR");
-		chains_detected++;
+		if (A1_add_chain(c, a1) && A1_add_board(c, "BitmineA1.CCR"))
+				chains_detected++;
 	}
 	if (chains_detected == 0)
 		return false;
@@ -964,6 +998,7 @@ void A1_detect(bool hotplug)
 	if (hotplug)
 		return;
 
+	memset(a1_boards, 0, sizeof(a1_boards));
 	bool detected = false;
 	A1_parse_options();
 	applog(LOG_DEBUG, "A1 detect");
@@ -996,45 +1031,22 @@ void A1_detect(bool hotplug)
 #define TEMP_UPDATE_INT_MS	2000
 #define TEMP_THROTTLE_SLEEP_MS	5000
 #define IDLE_SLEEP_MS		120
-static int64_t A1_scanwork(struct thr_info *thr)
+static bool A1_scan_chain(struct thr_info *thr, struct A1_chain *a1)
 {
-	int i;
-	struct cgpu_info *cgpu = thr->cgpu;
-	struct A1_chain *a1 = cgpu->device_data;
-	int sleep_ms = IDLE_SLEEP_MS;
-
-	if (a1->num_cores == 0) {
-		cgpu->deven = DEV_DISABLED;
-		return 0;
-	}
-	if (thr->work_restart)
-		return 0;
-
-	board_selector->select(a1->chain_id);
-
-	set_spi_clk(a1);
-
-	applog(LOG_DEBUG, "A1 running scanwork");
-
-	uint32_t nonce;
-	uint8_t chip_id;
-	uint8_t job_id;
-
-	mutex_lock(&a1->lock);
-
-	if (a1->last_temp_time + TEMP_UPDATE_INT_MS < get_current_ms()) {
-		a1->temp = board_selector->get_temp(0);
-		a1->last_temp_time = get_current_ms();
-		cgpu->temp = a1->temp;
-	}
 	int cid = a1->chain_id;
 	/* poll queued results */
 	while (true) {
+		uint32_t nonce;
+		uint8_t chip_id;
+		uint8_t job_id;
+
 		if (thr->work_restart)
-			goto abort;
+			return true;
 		if (!get_nonce(a1, (uint8_t*)&nonce, &chip_id, &job_id))
-			break;
+			return true;
 		nonce = bswap_32(nonce);
+		applog(LOG_DEBUG, "%2d/%2d: got nonce 0x%08x",
+		       cid, chip_id, nonce);
 		if (chip_id < 1 || chip_id > a1->num_active_chips) {
 			applog(LOG_WARNING, "chain %d: wrong chip_id %d",
 			       cid, chip_id);
@@ -1057,10 +1069,8 @@ static int64_t A1_scanwork(struct thr_info *thr)
 			continue;
 		}
 		if (!submit_nonce(thr, work, nonce)) {
-			int penalty = (int)work->device_diff;
-			a1->nonce_ranges_processed -= penalty;
-			applog(LOG_WARNING, "%2d/%2d: invalid nonce 0x%08x, penalty=%d (%d)",
-			       cid, chip_id, nonce, penalty, a1->nonce_ranges_processed);
+			applog(LOG_WARNING, "%2d/%2d: invalid nonce 0x%08x",
+			       cid, chip_id, nonce);
 			add_nonce_bad(chip);
 			continue;
 		}
@@ -1068,17 +1078,19 @@ static int64_t A1_scanwork(struct thr_info *thr)
 		       cid, chip_id, job_id, nonce);
 		add_nonce_good(chip);
 	}
+	return false;
+}
 
-	if (cgpu->cutofftemp > 0 && a1->temp > cgpu->cutofftemp) {
-		applog(LOG_WARNING, "%d: throttling at %d (%d)",
-		       cid, a1->temp, cgpu->cutofftemp);
-		sleep_ms = TEMP_THROTTLE_SLEEP_MS;
-		goto done;
-	}
+static int A1_feed_work(struct thr_info *thr, struct A1_chain *a1)
+{
+	int i;
+	int nonce_ranges_processed = 0;
+
+	int cid = a1->chain_id;
 	/* check for completed works */
 	for (i = a1->num_active_chips; i > 0; i--) {
 		if (thr->work_restart)
-			goto abort;
+			return 0;
 		uint8_t c = i;
 		if (is_chip_disabled(a1, c))
 			continue;
@@ -1106,7 +1118,7 @@ static int64_t A1_scanwork(struct thr_info *thr)
 			}
 			if (set_work(a1, c, work, qbuff)) {
 				chip->nonce_ranges_done++;
-				a1->nonce_ranges_processed++;
+				nonce_ranges_processed++;
 			}
 			/* fall through */
 		case 1:
@@ -1118,7 +1130,7 @@ static int64_t A1_scanwork(struct thr_info *thr)
 			}
 			if (set_work(a1, c, work, qbuff)) {
 				chip->nonce_ranges_done++;
-				a1->nonce_ranges_processed++;
+				nonce_ranges_processed++;
 			}
 			applog(LOG_DEBUG, "%d: chip %d: job done: %d/%d/%d/%d",
 			       cid, c,
@@ -1128,57 +1140,98 @@ static int64_t A1_scanwork(struct thr_info *thr)
 		}
 	}
 	check_disabled_chips(a1);
-done:
-	mutex_unlock(&a1->lock);
+	return nonce_ranges_processed;
+}
 
-	board_selector->release();
-
+static int64_t A1_scanwork(struct thr_info *thr)
+{
+	int i;
+	struct cgpu_info *cgpu = thr->cgpu;
+	struct A1_board *a1b = cgpu->device_data;
+	int sleep_ms = IDLE_SLEEP_MS;
 	int64_t ret = 0;
-	if (a1->nonce_ranges_processed < 0) {
-		applog(LOG_DEBUG, "%d, negative nonces processed %d",
-		       cid, a1->nonce_ranges_processed);
-	} else {
-		applog(LOG_DEBUG, "%d, nonces processed %d",
-		       cid, a1->nonce_ranges_processed);
-		ret = a1->nonce_ranges_processed;
-		ret <<= 32;
-		a1->nonce_ranges_processed = 0;
-	}
-	cgsleep_ms(sleep_ms);
-	return ret;
 
-abort:
-	mutex_unlock(&a1->lock);
+	if (a1b->num_active_chains == 0) {
+		cgpu->deven = DEV_DISABLED;
+		return 0;
+	}
+	if (thr->work_restart)
+		return 0;
+
+	applog(LOG_DEBUG, "A1 running scanwork");
+
+	board_selector->select(a1b->board_id);
+	mutex_lock(&a1b->lock);
+
+	int now = get_current_ms();
+	if (a1b->last_temp_time + TEMP_UPDATE_INT_MS < get_current_ms()) {
+		a1b->temp = board_selector->get_temp(0);
+		a1b->last_temp_time = now;
+		cgpu->temp = a1b->temp;
+		if (cgpu->cutofftemp > 0 && a1b->temp > cgpu->cutofftemp) {
+			applog(LOG_WARNING, "%d: throttling at %d (%d)",
+			       a1b->board_id, a1b->temp, cgpu->cutofftemp);
+			a1b->cooldown_end = now + TEMP_THROTTLE_SLEEP_MS;
+		}
+	}
+	for (i = 0; i < a1b->num_chains; i++) {
+		if (thr->work_restart)
+			goto done;
+
+		struct A1_chain *a1 = a1b->chain[i];
+		if (a1 == NULL)
+			continue;
+		if (a1->num_cores == 0)
+			continue;
+
+//applog(LOG_WARNING, "********** %d/%d:%d/%d", i, a1->chain_id, a1->num_chips, a1->num_cores);
+		set_spi_clk(a1);
+		A1_scan_chain(thr, a1);
+
+		/* don't feed new work during cooldown periods */
+		if (a1b->cooldown_end == 0 || a1b->cooldown_end < now) {
+			a1b->cooldown_end = 0;
+			ret += A1_feed_work(thr, a1);
+		}
+	}
+done:
+	mutex_unlock(&a1b->lock);
 	board_selector->release();
-	return 0;
+
+	cgsleep_ms(sleep_ms);
+	ret <<= 32;
+	return ret;
 }
 
 
 /* queue two work items per chip in chain */
 static bool A1_queue_full(struct cgpu_info *cgpu)
 {
-	struct A1_chain *a1 = cgpu->device_data;
-	int queue_full = false;
+	struct A1_board *a1b = cgpu->device_data;
+	int queue_full = true;
 
-	mutex_lock(&a1->lock);
-	applog(LOG_DEBUG, "%d, A1 running queue_full: %d/%d",
-	       a1->chain_id, a1->active_wq.num_elems, a1->num_active_chips);
+	mutex_lock(&a1b->lock);
+	int i;
+	for (i = 0; i < a1b->num_chains; i++) {
+		struct A1_chain *a1 = a1b->chain[i];
+//applog(LOG_WARNING, "FFFFFFF %d/%d:%d/%d", i, a1->chain_id, a1->num_chips, a1->num_cores);
 
-	if (a1->active_wq.num_elems >= a1->num_active_chips * 2)
-		queue_full = true;
-	else
+		applog(LOG_DEBUG, "%d, A1 running queue_full: %d/%d",
+		       a1->chain_id, a1->active_wq.num_elems, a1->num_active_chips);
+		if (a1->active_wq.num_elems >= a1->num_active_chips * 2)
+			continue;
+		queue_full = false;
 		A1_wq_enqueue(&a1->active_wq, get_queued(cgpu));
-
-	mutex_unlock(&a1->lock);
+	}
+	mutex_unlock(&a1b->lock);
 
 	return queue_full;
 }
 
-static void A1_flush_work(struct cgpu_info *cgpu)
+static void A1_flush_chain_work(struct A1_chain *a1)
 {
-	struct A1_chain *a1 = cgpu->device_data;
+	struct cgpu_info *cgpu = a1->board->cgpu;
 	int cid = a1->chain_id;
-	board_selector->select(cid);
 
 	set_spi_clk(a1);
 
@@ -1186,7 +1239,6 @@ static void A1_flush_work(struct cgpu_info *cgpu)
 
 	int i;
 
-	mutex_lock(&a1->lock);
 	/* stop chips hashing current work */
 	if (!abort_work(a1)) {
 		applog(LOG_ERR, "%d: failed to abort work in chip chain!", cid);
@@ -1207,21 +1259,45 @@ static void A1_flush_work(struct cgpu_info *cgpu)
 		assert(work != NULL);
 		work_completed(cgpu, work);
 	}
-	mutex_unlock(&a1->lock);
+}
 
+static void A1_flush_work(struct cgpu_info *cgpu)
+{
+	int i;
+	struct A1_board *a1b = cgpu->device_data;
+	int bid = a1b->board_id;
+
+	applog(LOG_DEBUG, "%d: A1 running flushwork", bid);
+
+	board_selector->select(bid);
+	mutex_lock(&a1b->lock);
+
+	for (i = 0; i < a1b->num_chains; i++)
+		A1_flush_chain_work(a1b->chain[i]);
+
+	mutex_unlock(&a1b->lock);
 	board_selector->release();
 }
 
 static void A1_get_statline_before(char *buf, size_t len,
 				   struct cgpu_info *cgpu)
 {
-	struct A1_chain *a1 = cgpu->device_data;
+	struct A1_board *a1b = cgpu->device_data;
 	char temp[10];
-	if (a1->temp != 0)
-		snprintf(temp, 9, "%2dC", a1->temp);
+	if (a1b->temp != 0)
+		snprintf(temp, 9, "%2dC", a1b->temp);
+	else
+		snprintf(temp, 9, "   ");
+	int active_chips = 0;
+	int num_cores = 0;
+	int i;
+	for (i = 0; i < a1b->num_chains; i++) {
+		struct A1_chain *a1 = a1b->chain[i];
+		active_chips += a1->num_active_chips;
+		num_cores += a1->num_cores;
+	}
 	tailsprintf(buf, len, " %2d:%2d/%3d %s",
-		    a1->chain_id, a1->num_active_chips, a1->num_cores,
-		    a1->temp == 0 ? "   " : temp);
+		    a1b->board_id, active_chips, num_cores, temp);
 }
 
 static void A1_shutdown(struct thr_info *thr)

@@ -45,6 +45,7 @@ static const struct board_selector dummy_board_selector = {
 #define CCD_MAX_CHAINS	5
 #define CCR_MAX_CHAINS	16
 #define CCB_MAX_CHAINS	16
+#define CCB_MAX_BOARDS	8
 extern struct board_selector *ccd_board_selector_init(void);
 extern struct board_selector *ccr_board_selector_init(void);
 extern struct board_selector *ccb_board_selector_init(void);

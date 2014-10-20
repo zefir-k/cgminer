@@ -40,7 +40,7 @@ struct A1_autotune_stats {
 };
 struct A1_chip {
 	int chip_id;
-	struct A1_chain *a1;
+	struct A1_chain *chain;
 	int num_cores;
 	int last_queued_id;
 	struct work *work[4];
@@ -64,38 +64,37 @@ struct A1_chip {
 	int atune_level;
 };
 
+struct A1_board;
 struct A1_chain {
+	struct A1_board *board;
 	int chain_id;
-	struct cgpu_info *cgpu;
-	struct mcp4x *trimpot;
+	struct A1_chip *chips;
 	int num_chips;
 	int num_cores;
 	int num_active_chips;
-	int chain_skew;
 	uint8_t spi_tx[MAX_CMD_LENGTH];
 	uint8_t spi_rx[MAX_CMD_LENGTH];
 	struct spi_ctx *spi_ctx;
-	struct A1_chip *chips;
-	pthread_mutex_t lock;
 
 	struct work_queue active_wq;
 
 	/* mark chain disabled, do not try to re-enable it */
 	bool disabled;
-	uint8_t temp;
-	int last_temp_time;
 
 	int sys_clk;
-
-	/* accounting nonces processed over error penalty */
-	int nonce_ranges_processed;
 };
 
 #define MAX_CHAINS_PER_BOARD	2
 struct A1_board {
+	struct cgpu_info *cgpu;
 	int board_id;
 	int num_chains;
 	struct A1_chain *chain[MAX_CHAINS_PER_BOARD];
+	pthread_mutex_t lock;
+	uint8_t temp;
+	int last_temp_time;
+	int num_active_chains;
+	int cooldown_end;
 };
 
 /* A1-utils */
